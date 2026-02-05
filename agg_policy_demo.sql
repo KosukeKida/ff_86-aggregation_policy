@@ -1,26 +1,29 @@
--- データベース作成、ロール作成からやるのでsysadminやuseradminが使えること
--- WAREHOUSEだけ事前作成済みのmy_whを使用しています。
+-- ===========================================
+-- Aggregation Policy デモ（再実行可能版）
+-- ===========================================
 
+-- ロール作成
 USE ROLE useradmin;
-CREATE ROLE ff;
+CREATE ROLE IF NOT EXISTS ff;
 GRANT ROLE ff TO ROLE sysadmin;
 
 USE ROLE sysadmin;
-GRANT usage ON WAREHOUSE my_wh TO ROLE ff;
+GRANT USAGE ON WAREHOUSE my_wh TO ROLE ff;
 
+-- データベース・スキーマ作成
 USE ROLE sysadmin;
-CREATE DATABASE frosty_friday;
-GRANT OWNERSHIP ON DATABASE frosty_friday TO ROLE ff;
+CREATE DATABASE IF NOT EXISTS frosty_friday;
+GRANT OWNERSHIP ON DATABASE frosty_friday TO ROLE ff COPY CURRENT GRANTS;
 
 USE ROLE ff;
 USE WAREHOUSE my_wh;
 USE DATABASE frosty_friday;
-CREATE SCHEMA agg_demo;
+CREATE SCHEMA IF NOT EXISTS agg_demo;
 USE SCHEMA agg_demo;
 
 
--- Create the Sales_Records table
-CREATE TABLE Sales_Records (
+-- Sales_Records テーブル作成
+CREATE OR REPLACE TABLE Sales_Records (
     Order_ID INT,
     Product_Name VARCHAR(50),
     Product_Category VARCHAR(50),
@@ -29,7 +32,7 @@ CREATE TABLE Sales_Records (
     Customer_ID INT
 );
 
--- Insert sample data into the Sales_Records table
+-- サンプルデータ投入
 INSERT INTO Sales_Records (Order_ID, Product_Name, Product_Category, Quantity, Unit_Price, Customer_ID) VALUES
 (1, 'Laptop', 'Electronics', 2, 1200.00, 101),
 (2, 'Smartphone', 'Electronics', 1, 800.00, 102),
@@ -52,7 +55,7 @@ INSERT INTO Sales_Records (Order_ID, Product_Name, Product_Category, Quantity, U
 (19, 'Earrings', 'Accessories', 4, 15.00, 119),
 (20, 'Ring', 'Accessories', 2, 50.00, 120);
 
--- test query
+-- テストクエリ
 SELECT * FROM Sales_Records;
 /*
 ORDER_ID PRODUCT_NAME      PRODUCT_CATEGORY     QUANTITY   UNIT_PRICE    CUSTOMER_ID
@@ -77,27 +80,31 @@ Electronics          5                                  2700.00
 -- 通常のGRANT文でテーブルに対するSELECT権限を与えてしまうと明細/集計に関わらずなんでもSELECTできてしまいます。
 
 
+-- 部門別ロール作成
 USE ROLE useradmin;
-CREATE ROLE ff_cs_dept;  -- customer_id まで見て個々の製品購入者に対する問い合わせ対応にあたる
-CREATE ROLE ff_mk_dept;  -- マーケ目的では売れ筋の商品などがわかればよく「誰が何を買った」はプライバシーの観点から閲覧禁止したい
+CREATE ROLE IF NOT EXISTS ff_cs_dept;  -- customer_id まで見て個々の製品購入者に対する問い合わせ対応にあたる
+CREATE ROLE IF NOT EXISTS ff_mk_dept;  -- マーケ目的では売れ筋の商品などがわかればよく「誰が何を買った」はプライバシーの観点から閲覧禁止したい
 GRANT ROLE ff_cs_dept TO ROLE ff;
 GRANT ROLE ff_mk_dept TO ROLE ff;
 
 
 USE ROLE ff;
-GRANT usage ON DATABASE frosty_friday TO ROLE ff_cs_dept;
-GRANT usage ON SCHEMA agg_demo TO ROLE ff_cs_dept;
-GRANT select ON ALL TABLES IN SCHEMA agg_demo TO ROLE ff_cs_dept;
-CREATE DATABASE ROLE bypass_agg_for_csinfo;
+
+-- CS部門への権限付与
+GRANT USAGE ON DATABASE frosty_friday TO ROLE ff_cs_dept;
+GRANT USAGE ON SCHEMA agg_demo TO ROLE ff_cs_dept;
+GRANT SELECT ON ALL TABLES IN SCHEMA agg_demo TO ROLE ff_cs_dept;
+CREATE DATABASE ROLE IF NOT EXISTS bypass_agg_for_csinfo;
 GRANT DATABASE ROLE bypass_agg_for_csinfo TO ROLE ff_cs_dept;
 
-GRANT usage ON DATABASE frosty_friday TO ROLE ff_mk_dept;
-GRANT usage ON SCHEMA agg_demo TO ROLE ff_mk_dept;
-GRANT select ON ALL TABLES IN SCHEMA agg_demo TO ROLE ff_mk_dept;
+-- MK部門への権限付与
+GRANT USAGE ON DATABASE frosty_friday TO ROLE ff_mk_dept;
+GRANT USAGE ON SCHEMA agg_demo TO ROLE ff_mk_dept;
+GRANT SELECT ON ALL TABLES IN SCHEMA agg_demo TO ROLE ff_mk_dept;
 
 
 -- 権限チェック
-USE SECONDARY ROLE none;
+USE SECONDARY ROLES NONE;
 
 USE ROLE ff_cs_dept;
 SELECT IS_DATABASE_ROLE_IN_SESSION('BYPASS_AGG_FOR_CSINFO');
@@ -110,7 +117,8 @@ SELECT * FROM sales_records;
 
 -- ポリシー作成
 USE ROLE ff;
-CREATE AGGREGATION POLICY ff_agg_policy
+
+CREATE OR REPLACE AGGREGATION POLICY ff_agg_policy
   AS () RETURNS AGGREGATION_CONSTRAINT ->
     CASE
       WHEN IS_DATABASE_ROLE_IN_SESSION('BYPASS_AGG_FOR_CSINFO') = true
@@ -118,7 +126,7 @@ CREATE AGGREGATION POLICY ff_agg_policy
       ELSE AGGREGATION_CONSTRAINT(MIN_GROUP_SIZE => 4)
     END;
 
-ALTER TABLE Sales_Records SET AGGREGATION POLICY ff_agg_policy;
+ALTER TABLE Sales_Records SET AGGREGATION POLICY ff_agg_policy FORCE;
 
 /* その他運用操作
 ALTER TABLE Sales_Records SET AGGREGATION POLICY ff_agg_policy_2 FORCE; -- 既存ポリシーを置き換える際、タイミング問題で閲覧できてしまう瞬間を防ぐ
@@ -129,7 +137,7 @@ ALTER TABLE Sales_Records UNSET AGGREGATION POLICY; -- テーブルからポリ�
 -- 許可されたロールのみが許可された集約関数を実行できる
 -- https://docs.snowflake.com/ja/user-guide/aggregation-policies#query-requirements
 
-USE SECONDARY ROLE none;
+USE SECONDARY ROLES NONE;
 
 USE ROLE ff_cs_dept;
 SELECT IS_DATABASE_ROLE_IN_SESSION('BYPASS_AGG_FOR_CSINFO');
@@ -219,4 +227,3 @@ Electronics          6                                  3200.00
 クエリされたスコアの累積が一日のバジェットを超えるとそれ以上はクエリさせないという機能があります。
 いずれも上記例のように「連続実行することである値が増えた瞬間を捕まえる」ことを防ぎます。
 */
-
