@@ -2,7 +2,7 @@ SnowflakeのAGGREGATION POLICYを使って、利用者のロールによって�
 
 ## 準備するもの
 * Snowflakeアカウント（Enterprise Edition以上必須、トライアルでOK）
-* SYSADMINおよびUSERADMIN権限
+* 一部ACCOUNTADMIN、メイン操作はSYSADMINおよびUSERADMIN権限
 * 仮想ウェアハウスを事前に一つ作成しておくこと（スクリプト内ではmy_whを使用）
 
 ## 対象の問題
